@@ -1,13 +1,12 @@
 import csv
 import os
-import re
 import torch
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
 from datasets import load_dataset
-from transformers import AutoProcessor, LlavaForConditionalGeneration
+from transformers import AutoProcessor, LlavaProcessor, LlavaForConditionalGeneration, BitsAndBytesConfig
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 import requests
@@ -16,99 +15,9 @@ import wandb
 from typing import Optional, Dict, List
 import evaluate
 from pathlib import Path    
-import numpy as np
-import sklearn.metrics as sklm
 from torchmetrics import Metric
 from sklearn.metrics import recall_score
 
-# ---------------------------------------------------------------------------
-# Helper function to preprocess text for exact match accuracy calculation.
-def preprocess_text(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r'[^a-z0-9\s]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
-# ---------------------------------------------------------------------------
-# VQARAD Tokenwise
-# class VQARADScore(Metric):
-#     def __init__(self, dist_sync_on_step=False):
-#         super().__init__(dist_sync_on_step=dist_sync_on_step)
-
-#         # Define states for tracking scores
-#         self.add_state("score", default=torch.tensor(0.0), dist_reduce_fx="sum")
-#         self.add_state("total", default=torch.tensor(0.0), dist_reduce_fx="sum")
-
-#         self.add_state("close_score", default=torch.tensor(0.0), dist_reduce_fx="sum")
-#         self.add_state("close_total", default=torch.tensor(0.0), dist_reduce_fx="sum")
-
-#         self.add_state("open_score", default=torch.tensor(0.0), dist_reduce_fx="sum")
-#         self.add_state("open_total", default=torch.tensor(0.0), dist_reduce_fx="sum")
-
-#         # Track best scores
-#         self.best_score = 0
-#         self.best_close_score = 0
-#         self.best_open_score = 0
-
-#     def update(self, logits, target, types=None):
-#         """Update metric state with new batch of predictions and targets."""
-#         device = self.score.device  # Ensure all tensors are on the same device
-
-#         # Convert logits to predicted class indices
-#         preds = torch.argmax(logits, dim=-1)  # Shape: [batch_size, seq_len]
-
-#         # Ensure target is on the same device and has correct shape
-#         target = target.to(device)
-
-#         # Compare predictions with target
-#         correct = (preds == target).float()  # Shape: [batch_size, seq_len]
-        
-#         # Compute accuracy per sample (averaged over sequence length)
-#         sample_acc = correct.mean(dim=-1)  # Shape: [batch_size]
-
-#         # Update total score
-#         self.score += sample_acc.sum()
-#         self.total += target.size(0)
-
-#         # Split scores into open and close types
-#         if types is not None:
-#             types = torch.tensor(types, device=device)  # Ensure `types` is a tensor
-#             close_mask = (types == 0).to(device)
-#             open_mask = (types == 1).to(device)
-
-#             if close_mask.any():
-#                 self.close_score += sample_acc[close_mask.nonzero(as_tuple=True)].sum()
-#                 self.close_total += close_mask.sum().float()
-
-#             if open_mask.any():
-#                 self.open_score += sample_acc[open_mask.nonzero(as_tuple=True)].sum()
-#                 self.open_total += open_mask.sum().float()
-
-#     def compute(self):
-#         """Compute the final metric value."""
-#         return self.score / self.total if self.total > 0 else torch.tensor(0.0)
-
-#     def get_best_score(self):
-#         """Get the best overall score."""
-#         self.sync()
-#         score = self.compute()
-#         if score > self.best_score:
-#             self.best_score = score
-#             self.best_close_score = self.close_score / self.close_total if self.close_total > 0 else 0
-#             self.best_open_score = self.open_score / self.open_total if self.open_total > 0 else 0
-#         self.unsync()
-#         return self.best_score
-
-#     def get_best_close_score(self):
-#         """Get the best close-ended score."""
-#         return self.best_close_score
-
-#     def get_best_open_score(self):
-#         """Get the best open-ended score."""
-#         return self.best_open_score
-
-
-# Updated VQARADScore without sync/unsync calls
 class VQARADScore(Metric):
     def __init__(self, dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
@@ -180,23 +89,36 @@ class VQARADScore(Metric):
         """Get the best open-ended recall."""
         return self.best_open_recall
 
+    # def update(self, pred, target, types=None):
+    #     """Update metric state with new predictions and targets."""
+        
+    #     pred = pred.lower()
+    #     target = target.lower()
 
-# ---------------------------------------------------------------------------
-# Data loading and processing
+    #     # Update overall score
+    #     self.total += 1
+    #     if target in pred:
+    #         self.score += 1
 
-class SlakeDataset(Dataset):
-    def __init__(self, dataset_split, processor, base_img_dir='./imgs', max_length=2048):
-        """
-        Args:
-            dataset_split: HuggingFace dataset split
-            processor: Llava processor
-            base_img_dir: Base directory containing images
-            max_length: Maximum sequence length
-        """
-        # Filter dataset to only include English questions
-        self.dataset = [item for item in dataset_split if item.get('q_lang') == "en"]
+    #     # Update based on question type (0 = close-ended, 1 = open-ended)
+    #     if types == 0:
+    #         self.close_total += 1
+    #         if target in pred:
+    #             self.close_score += 1
+    #     elif types == 1:
+    #         self.open_total += 1
+    #         if target in pred:
+    #             self.open_score += 1
+    #     else:
+    #         raise ValueError("types must be 0 (close-ended) or 1 (open-ended)")
+
+
+################################################
+
+class VQARADDataset(Dataset):
+    def __init__(self, dataset_split, processor, max_length=2048):
+        self.dataset = dataset_split
         self.processor = processor
-        self.base_img_dir = Path(base_img_dir)
         self.max_length = max_length
 
     def __len__(self):
@@ -205,16 +127,8 @@ class SlakeDataset(Dataset):
     def __getitem__(self, idx):
         item = self.dataset[idx]
 
-        # Construct full image path
-        image_path = str(self.base_img_dir / item['img_name'])
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image file not found: {image_path}")
-
-        try:
-            image = Image.open(image_path).convert('RGB')
-        except Exception as e:
-            print(f"Error loading image {image_path}: {e}")
-            raise
+        # Load image
+        image = item['image'].convert('RGB')
 
         # Construct prompt
         conversation = [
@@ -233,7 +147,7 @@ class SlakeDataset(Dataset):
             ]
         prompt = self.processor.apply_chat_template(conversation, add_generation_prompt=True)
 
-        # Tokenize prompt + image
+        # Tokenize prompt and process image
         inputs = self.processor(
             text=prompt,
             images=image,
@@ -242,12 +156,12 @@ class SlakeDataset(Dataset):
             max_length=self.max_length,
             truncation=True
         )
+        if item['answer'] == 'yes' or item['answer'] == 'no':
+            answer_type = 'CLOSE'
+        else:
+            answer_type = 'OPEN'
 
-        for key in inputs:
-            if torch.is_tensor(inputs[key]):
-                inputs[key] = inputs[key].squeeze(0)
-
-        # Tokenize only the answer (without prompt)
+        # Tokenize the answer
         target = self.processor.tokenizer(
             item['answer'],
             return_tensors="pt",
@@ -256,51 +170,68 @@ class SlakeDataset(Dataset):
             truncation=True,
         ).input_ids.squeeze(0)
 
-        # Extract answer type (open-ended or close-ended)
-        answer_type = item.get('answer_type', "OPEN")  # Default to 'OPEN' if missing
-
         return {
-            "input_ids": inputs.input_ids,
-            "attention_mask": inputs.attention_mask,
-            "pixel_values": inputs.pixel_values,
+            "input_ids": inputs.input_ids.squeeze(0),
+            "attention_mask": inputs.attention_mask.squeeze(0),
+            "pixel_values": inputs.pixel_values.squeeze(0),
             "labels": target,
             "answer_type": answer_type
         }
     
-class SlakeDataModule(pl.LightningDataModule):
+
+class VQARADDataModule(pl.LightningDataModule):
     def __init__(
         self,
         processor,
-        base_img_dir: str = './img',  # Updated default path
         train_batch_size: int = 8,
-        eval_batch_size: int = 4,
+        eval_batch_size: int = 8,
         num_workers: int = 4,
         max_length: int = 2048
     ):
+        """
+        Args:
+            processor: Llava processor for text and image processing
+            train_batch_size: Batch size for training
+            eval_batch_size: Batch size for validation/testing
+            num_workers: Number of workers for data loading
+            max_length: Maximum sequence length for tokenization
+        """
         super().__init__()
         self.processor = processor
-        self.base_img_dir = base_img_dir
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
         self.num_workers = num_workers
         self.max_length = max_length
+        self.save_hyperparameters(ignore=['processor'])
 
     def setup(self, stage: Optional[str] = None):
-        # Load dataset
-        dataset = load_dataset("BoKelvin/SLAKE")
-
+        # Load dataset from Hugging Face
+        dataset = load_dataset("flaviagiammarino/vqa-rad")
+        
         # Create dataset instances
-        self.train_dataset = SlakeDataset(dataset["train"], self.processor, self.base_img_dir, self.max_length)
-        self.val_dataset = SlakeDataset(dataset["validation"], self.processor, self.base_img_dir, self.max_length)
-        self.test_dataset = SlakeDataset(dataset["test"], self.processor, self.base_img_dir, self.max_length)
-
+        self.train_dataset = VQARADDataset(
+            dataset["train"], 
+            self.processor, 
+            self.max_length
+        )
+        self.val_dataset = VQARADDataset(
+            dataset["validation"] if "validation" in dataset else dataset["test"], 
+            self.processor, 
+            self.max_length
+        )
+        self.test_dataset = VQARADDataset(
+            dataset["test"], 
+            self.processor, 
+            self.max_length
+        )
+    
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
             batch_size=self.train_batch_size,
             shuffle=True,
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=True
         )
 
     def val_dataloader(self):
@@ -319,8 +250,6 @@ class SlakeDataModule(pl.LightningDataModule):
             pin_memory=True
         )
 
-# ---------------------------------------------------------------------------
-# Llava FineTuner Module with updated generated response accuracy calculation
 
 class LlavaFineTuner(pl.LightningModule):
     def __init__(
@@ -334,22 +263,56 @@ class LlavaFineTuner(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         
+        # # Configure 4-bit quantization
+        # quantization_config = BitsAndBytesConfig(
+        #     load_in_4bit=True,
+        #     bnb_4bit_compute_dtype=torch.float16,
+        #     bnb_4bit_use_double_quant=True,
+        #     bnb_4bit_quant_type="nf4"  # normalized float 4
+        # )
+
+        # # Model loading configuration
+        # model_config = {
+        #     "device_map": "auto",  # Automatically distribute across available GPUs
+        #     "torch_dtype": torch.float16,
+        #     "quantization_config": quantization_config
+        # }
+
+        # # Load model with 4-bit quantization
+        # self.model = LlavaForConditionalGeneration.from_pretrained(
+        #     model_name,
+        #     **model_config
+        # )
+
         # Load model
         self.model = LlavaForConditionalGeneration.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16
         )
+        
         self.processor = AutoProcessor.from_pretrained(model_name)
         
         # Freeze all layers first
         for param in self.model.parameters():
             param.requires_grad = False
 
-        # Unfreeze selected layers (example: layers with indices in these ranges)
         for i, (name, module) in enumerate(self.model.named_modules()):
+            # print(i, name, module)
             if i in range(250, 302) or i in range(650, 725):
                 for param in module.parameters():
                     param.requires_grad = True
+
+
+        # # List all transformer blocks inside the model
+        # transformer_blocks = [module for name, module in self.model.named_modules() if "transformer" in name.lower()]
+
+        # if not transformer_blocks:
+        #     raise ValueError("No transformer layers found. Check model architecture.")
+
+        # # Unfreeze only the last `trainable_layers` blocks
+        # for block in transformer_blocks[-trainable_layers:]:  # Get last N layers
+        #     for param in block.parameters():
+        #         param.requires_grad = True
 
         # Metrics
         self.rouge = evaluate.load('rouge')
@@ -363,6 +326,11 @@ class LlavaFineTuner(pl.LightningModule):
         self.test_vqa_close = VQARADScore()
 
     def forward(self, **inputs):
+        # print('**Forward pass**')
+        # print(self.model.config)
+        # for key in inputs.keys():
+        #     print(key)
+        #     print(inputs[key].shape)
         return self.model(**inputs)
     
     def step(self, batch):
@@ -372,15 +340,22 @@ class LlavaFineTuner(pl.LightningModule):
             batch["labels"], 
             batch["answer_type"]
         )
+
         batch.pop("answer_type", None)
 
+        # Get model outputs
         outputs = self(**batch)
-        loss = outputs.loss  # Assuming model provides a loss
-        logits = outputs.logits
 
+        # Extract loss and logits from outputs
+        loss = outputs.loss  # Assuming model provides a loss
+        logits = outputs.logits  # Model outputs logits
+
+
+        # Ensure logits and targets have compatible shapes
         if logits.shape[0] != targets.shape[0]:
             raise ValueError(f"Shape Mismatch: Logits {logits.shape}, Targets {targets.shape}")
 
+        # Ensure targets are long for loss computation
         targets = targets.long()
 
         # Generate predictions
@@ -406,7 +381,7 @@ class LlavaFineTuner(pl.LightningModule):
             
 
         return logits, targets, loss, answer_types, stripped_responses, references
-    
+
     def training_step(self, batch, batch_idx):
         logits, targets, loss, answer_types, preds, targets = self.step(batch)
 
@@ -430,7 +405,7 @@ class LlavaFineTuner(pl.LightningModule):
         }
 
         # Save metrics to local CSV file
-        log_file = "training_log_slake.csv"
+        log_file = "training_log_vqarad.csv"
         file_exists = os.path.isfile(log_file)
 
         with open(log_file, mode="a", newline="") as f:
@@ -444,6 +419,7 @@ class LlavaFineTuner(pl.LightningModule):
         self.log("train_vqa_close", train_vqa_close_value, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
 
         return loss
+
 
     def validation_step(self, batch, batch_idx):
         logits, targets, loss, answer_types, preds, targets = self.step(batch)
@@ -480,7 +456,7 @@ class LlavaFineTuner(pl.LightningModule):
         }
 
         # Save metrics to local CSV file
-        log_file = "validation_log_slake.csv"
+        log_file = "validation_log_vqarad.csv"
         file_exists = os.path.isfile(log_file)
 
         with open(log_file, mode="a", newline="") as f:
@@ -498,6 +474,7 @@ class LlavaFineTuner(pl.LightningModule):
         self.log("val_rougeL", rouge_scores['rougeL'], prog_bar=True, on_epoch=True, sync_dist=True)
 
         return loss
+
 
     def test_step(self, batch, batch_idx):
         logits, targets, loss, answer_types, preds, targets = self.step(batch)
@@ -533,7 +510,7 @@ class LlavaFineTuner(pl.LightningModule):
         }
 
         # Save metrics to local CSV file
-        log_file = "test_log_slake.csv"
+        log_file = "test_log_vqarad.csv"
         file_exists = os.path.isfile(log_file)
 
         with open(log_file, mode="a", newline="") as f:
@@ -575,12 +552,14 @@ class LlavaFineTuner(pl.LightningModule):
         }
 
 
+
 def main():
-    wandb.init(project='llava-slack-24')
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1" 
+    
+    wandb.init(project='llava-vqarad-24')
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
     
     # Model and training configuration
-    MODEL_NAME = "llava-finetuned-slake-2"
+    MODEL_NAME = "llava-finetuned-vqarad-5"
     TRAIN_BATCH_SIZE = 2
     EVAL_BATCH_SIZE = 2
     NUM_WORKERS = 8
@@ -588,18 +567,17 @@ def main():
     LEARNING_RATE = 2e-5
     WEIGHT_DECAY = 0.01
     WARMUP_STEPS = 50
-    MAX_EPOCHS = 5
-    BASE_IMG_DIR = './slack_imgs'
+    MAX_EPOCHS = 10
     GRADIENT_ACCUMULATION_STEPS = 8  # Simulates a larger batch size without memory spikes
     
+
     # Initialize processor
     processor = AutoProcessor.from_pretrained(MODEL_NAME)
     processor.tokenizer.pad_token = processor.tokenizer.eos_token  # Set padding token
     
     # Initialize datamodule
-    datamodule = SlakeDataModule(
+    datamodule = VQARADDataModule(
         processor=processor,
-        base_img_dir=BASE_IMG_DIR,
         train_batch_size=TRAIN_BATCH_SIZE,
         eval_batch_size=EVAL_BATCH_SIZE,
         num_workers=NUM_WORKERS,
@@ -614,6 +592,7 @@ def main():
         warmup_steps=WARMUP_STEPS
     )
 
+    
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints",
@@ -644,6 +623,7 @@ def main():
         logger=WandbLogger()      
     )
 
+    
     # Train and evaluate
     trainer.fit(model, datamodule=datamodule)
     trainer.test(model, datamodule=datamodule)
@@ -658,12 +638,15 @@ def main():
     print(f"Train Close-Ended Accuracy: {train_close_score}")
     print(f"Test Open-Ended Accuracy: {test_open_score}")
     print(f"Test Close-Ended Accuracy: {test_close_score}")
+
+    
     
     # Save final model
-    model.model.save_pretrained("llava-finetuned-slake-7")
-    processor.save_pretrained("llava-finetuned-slake-7")
+    model.model.save_pretrained("llava-finetuned-vqarad-15")
+    processor.save_pretrained("llava-finetuned-vqarad-15")
 
     # test_model_performance(model, datamodule, processor, num_samples=20)
+
 
 if __name__ == "__main__":
     main()

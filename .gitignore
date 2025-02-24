@@ -1,0 +1,6 @@
+slake/llava-finetuned-slake-*
+slake/slack_imgs
+slake/wandb
+
+vqarad/llava-finetuned-vqarad-*
+vqarad/wandb
