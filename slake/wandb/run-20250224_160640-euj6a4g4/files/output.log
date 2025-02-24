@@ -1,0 +1,72 @@
+Using a slow image processor as `use_fast` is unset and a slow processor was saved with this model. `use_fast=True` will be the default behavior in v4.48, even if the model was saved with a slow processor. This will result in minor differences in outputs. You'll still be able to use a slow processor with `use_fast=False`.
+Loading checkpoint shards: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:06<00:00,  2.14s/it]
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+Running in `fast_dev_run` mode: will run the requested loop using 2 batch(es). Logging and checkpointing is suppressed.
+You are using a CUDA device ('NVIDIA RTX A6000') that has Tensor Cores. To properly utilize them, you should set `torch.set_float32_matmul_precision('medium' | 'high')` which will trade-off precision for performance. For more details, read https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [1]
+Loading `train_dataloader` to estimate number of stepping batches.
+
+  | Name            | Type                          | Params | Mode
+--------------------------------------------------------------------------
+0 | model           | LlavaForConditionalGeneration | 7.1 B  | eval
+1 | train_vqa_open  | VQARADScore                   | 0      | train
+2 | train_vqa_close | VQARADScore                   | 0      | train
+3 | val_vqa_open    | VQARADScore                   | 0      | train
+4 | val_vqa_close   | VQARADScore                   | 0      | train
+5 | test_vqa_open   | VQARADScore                   | 0      | train
+6 | test_vqa_close  | VQARADScore                   | 0      | train
+--------------------------------------------------------------------------
+1.3 B     Trainable params
+5.7 B     Non-trainable params
+7.1 B     Total params
+28,253.708Total estimated model params size (MB)
+6         Modules in train mode
+725       Modules in eval mode
+Epoch 0:   0%|                                                                                                                                                                                                                                               | 0/2 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/bio/SHIVESH/slake/llava_train_slake_v2.py", line 659, in <module>
+    main()
+  File "/bio/SHIVESH/slake/llava_train_slake_v2.py", line 638, in main
+    trainer.fit(model, datamodule=datamodule)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/trainer/trainer.py", line 539, in fit
+    call._call_and_handle_interrupt(
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/trainer/call.py", line 47, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/trainer/trainer.py", line 575, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/trainer/trainer.py", line 982, in _run
+    results = self._run_stage()
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/trainer/trainer.py", line 1026, in _run_stage
+    self.fit_loop.run()
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/loops/fit_loop.py", line 216, in run
+    self.advance()
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/loops/fit_loop.py", line 455, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 150, in run
+    self.advance(data_fetcher)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 320, in advance
+    batch_output = self.automatic_optimization.run(trainer.optimizers[0], batch_idx, kwargs)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 185, in run
+    closure()
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 146, in __call__
+    self._result = self.closure(*args, **kwargs)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 131, in closure
+    step_output = self._step_fn()
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 319, in _training_step
+    training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/trainer/call.py", line 323, in _call_strategy_hook
+    output = fn(*args, **kwargs)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/pytorch_lightning/strategies/strategy.py", line 391, in training_step
+    return self.lightning_module.training_step(*args, **kwargs)
+  File "/bio/SHIVESH/slake/llava_train_slake_v2.py", line 406, in training_step
+    self.train_vqa_open.update(preds[i], targets[i], types=1)
+  File "/home/shivesh/env1/lib/python3.10/site-packages/torchmetrics/metric.py", line 550, in wrapped_func
+    update(*args, **kwargs)
+  File "/bio/SHIVESH/slake/llava_train_slake_v2.py", line 146, in update
+    for pred, target, type_ in zip(preds, targets, types):
+TypeError: 'int' object is not iterable
